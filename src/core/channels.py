@@ -9,7 +9,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
-from core.aux.observer import Observable
+from core.obs.observer import Observable
 import logging
 
 
@@ -118,6 +118,11 @@ class OutputChannel:
             self.logger.debug("Inserting new contents at {0}".format(
                 insert_point))
         self._set_buffer(self._binary_buffer[:insert_point] + new_binary)
+
+    def add_message(self, message):
+        new_binary = self.serializer.to_binary(message)
+        # append the binary encoding to the end of the current buffer
+        self._set_buffer(self._binary_buffer + new_binary)
 
     def clear(self):
         self._set_buffer('')

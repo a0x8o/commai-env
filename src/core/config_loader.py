@@ -52,13 +52,18 @@ class JSONConfigLoader:
         Given a json configuartion file, it returns a scheduler object
         set up as described in the file.
         '''
-        config = json.load(open(tasks_config_file))
+        if isinstance(tasks_config_file, str):
+            config = json.load(open(tasks_config_file))
+        elif isinstance(tasks_config_file, dict):
+            config = tasks_config_file
+
         # instantiate the worlds (typically there is only one)
         worlds = dict((world_id, self.instantiate_world(world_config['type']))
                       for world_id, world_config in config['worlds'].items())
         # map each task
         # instantiate the tasks with the world (if any)
         tasks = dict((task_id, self.instantiate_task(task_config['type'],
+                                                     task_config.get('args', {}),
                                                      worlds,
                                                      task_config.get(
                                                          'world', None)))
@@ -89,7 +94,7 @@ class JSONConfigLoader:
             raise RuntimeError("Failed to instantiate world {0} ({1})".format(
                 world_class, e))
 
-    def instantiate_task(self, task_class, worlds, world_id=None):
+    def instantiate_task(self, task_class, args, worlds, world_id=None):
         '''
         Returns a task object given the task class and the world where it
         runs (if any)
@@ -97,9 +102,8 @@ class JSONConfigLoader:
         C = get_class(task_class)
         try:
             if world_id:
-                return C(worlds[world_id])
-            else:
-                return C()
+                args['world'] = worlds[world_id]
+            return C(**args)
         except Exception as e:
             raise RuntimeError("Failed to instantiate task {0} ({1})".format(
                 task_class, e))

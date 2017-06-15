@@ -9,7 +9,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
-from core.aux.observer import Observable
+from core.obs.observer import Observable
 from core.events import Trigger
 from collections import defaultdict, namedtuple
 import logging
@@ -49,8 +49,15 @@ class MessageReceived():
 
     def is_message(self, msg, suffix=''):
         '''Checks if the received message matches the one in the parameter'''
-        return self.message[-(len(msg) + len(suffix)):-len(suffix)] == msg and\
-            suffix == self.message[-len(suffix):]
+        # if the suffix is empty we need, the semantics that would be
+        # reasonable for 0 have to be expressed with None
+        if len(suffix) > 0:
+            is_match = self.message[-(len(msg) + len(suffix)):
+                                    -len(suffix)] == msg and\
+                        suffix == self.message[-len(suffix):]
+        else:
+            is_match = self.message[-len(msg):] == msg
+        return is_match
 
     def is_message_exact(self, msg, suffix=''):
         '''Checks if the received message exactly matches the one in the parameter'''
@@ -332,6 +339,8 @@ class ScriptSet(object):
         self._env = None
         self._started = False
         self._ended = False
+        # observable events
+        self.ended_updated = Observable()
         # a bit ugly, but there are worse things in life
         self.state_updated = Observable()
         # remember dynamically register handlers to destroy their triggers
@@ -357,6 +366,7 @@ class ScriptSet(object):
 
     def end(self):
         self._ended = True
+        self.ended_updated(self)
 
     def get_triggers(self):
         '''Returns the set of triggers that have been registered for this
@@ -402,10 +412,15 @@ class ScriptSet(object):
 
     # ### API for the scripts ###
     def set_reward(self, reward, message='', priority=0):
+        self._reward = reward
         self._env.set_reward(reward, message, priority)
+        self.end()
 
     def set_message(self, message, priority=0):
         self._env.set_message(message, priority)
+
+    def add_message(self, message):
+        self._env.add_message(message)
 
     def ignore_last_char(self):
         '''
@@ -442,7 +457,7 @@ class Task(ScriptSet):
         # let it finish
         if t >= self._max_time and self._env._output_channel.is_empty():
             self._env.event_manager.raise_event(Timeout())
-            self._ended = True
+            self.end()
             return True
         return False
 
@@ -451,8 +466,14 @@ class Task(ScriptSet):
         self._env.raise_event(Start())
         self._started = True
 
-    def deinit(self):
+    def end(self):
+        super(Task, self).end()
         self._env.raise_event(Ended())
+
+    def deinit(self):
+        '''You can override this function to do anything just before the task
+        is deallocated'''
+        pass
 
     # ### API for the scripts ###
     def get_time(self):
@@ -480,3 +501,9 @@ class Task(ScriptSet):
             the message will be blocked.
         '''
         super(Task, self).set_message(message, priority)
+
+    def get_default_output(self):
+        '''Returns the token that should be spoken by the task whenever there
+        is no content in buffer.
+        '''
+        return self._env._serializer.SILENCE_TOKEN

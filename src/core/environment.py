@@ -12,7 +12,7 @@ from __future__ import unicode_literals
 from core.events import EventManager
 from core.task import StateChanged, MessageReceived, \
     SequenceReceived, OutputSequenceUpdated, OutputMessageUpdated
-from core.aux.observer import Observable
+from core.obs.observer import Observable
 from core.serializer import ScramblingSerializerWrapper
 from core.channels import InputChannel, OutputChannel
 from collections import defaultdict
@@ -64,14 +64,15 @@ class Environment:
         self._reward = None
         # Current task time
         self._task_time = None
-        # Task separator issued
-        self._task_separator_issued = False
+        # Task deinitialized
+        self._current_task_deinitialized = False
         # Internal logger
         self.logger = logging.getLogger(__name__)
 
         # signals
         self.world_updated = Observable()
         self.task_updated = Observable()
+        self.reward_given = Observable()
 
         # Register channel observers
         self._input_channel.sequence_updated.register(
@@ -89,7 +90,6 @@ class Environment:
         # Make sure we have a task
         if not self._current_task:
             self._switch_new_task()
-
         # If the task has not reached the end by either Timeout or
         # achieving the goal
         if not self._current_task.has_ended():
@@ -100,42 +100,49 @@ class Environment:
                 # record the input from the learner and deserialize it
                 # TODO this bit is dropped otherwise on a timeout...
                 self._input_channel.consume_bit(learner_input)
+
+            # fill the output buffer if the task hasn't produced any output
+            if self._output_channel.is_empty():
+                # demand for some output from the task (usually, silence)
+                self._output_channel.set_message(
+                    self._current_task.get_default_output())
             # We are in the middle of the task, so no rewards are given
             reward = None
         else:
-            # If the task is ended and there is nothing else to say,
-            # issue a silence and then return reward and move to next task
+            # If the task has ended and there is nothing else to say,
+            # deinitialize the task and if there is still nothing more to
+            # say, move to the next task
+            if self._output_channel.is_empty() \
+                    and not self._current_task_deinitialized:
+                # this triggers the Ended event on the task
+                self._current_task.deinit()
+                self._current_task_deinitialized = True
+
             if self._output_channel.is_empty():
-                if self._task_separator_issued:
-                    # Have nothing more to say
-                    # reward the learner if necessary and switch to new task
-                    reward = self._reward if self._reward is not None else 0
-                    self._switch_new_task()
-                    self._task_separator_issued = False
-                else:
-                    self._output_channel.set_message(
-                        self._serializer.SILENCE_TOKEN)
-                    self._task_separator_issued = True
-                    reward = None
+                self._reward = self._reward if self._reward is not None else 0
+                reward = self._allowable_reward(self._reward)
+
+                self._task_scheduler.reward(reward)
+                self._task_scheduler.nb_iteration()
+
+                self.reward_given(self._current_task, reward)
+
+                self._current_task_deinitialized = False
+                self._switch_new_task()
             else:
-                # TODO: decide what to do here.
-                # Should we consume the bit or not?
-                self._input_channel.consume_bit(learner_input)
-                # If there is still something to say, continue saying it
+                # Do Nothing until the output channel is empty
                 reward = None
+
         # Get one bit from the output buffer and ship it
-        if self._output_channel.is_empty():
-            self._output_channel.set_message(self._serializer.SILENCE_TOKEN)
         output = self._output_channel.consume_bit()
 
-        # we hear to ourselves
+        # we hear to ourselves (WARNING: this can still generate behavior
+        # in the task via the OutputMessageUpdated event)
         self._output_channel_listener.consume_bit(output)
+
         # advance time
         self._task_time += 1
-        if reward is not None:
-            # process the reward (clearing it if it's not allowed)
-            reward = self._allowable_reward(reward)
-            self._task_scheduler.reward(reward)
+
         return output, reward
 
     def get_reward_per_task(self):
@@ -184,13 +191,15 @@ class Environment:
         '''Sets the reward that is going to be given
         to the learner once the task has sent all the remaining message'''
         self._reward = reward
-        self._current_task.end()
         self.logger.debug('Setting reward {0} with message "{1}"'
                           ' and priority {2}'
                           .format(reward, message, priority))
-        # adds a final space to the final message of the task
-        # to separate the next task instructions
         self.set_message(message, priority)
+
+    def add_message(self, message):
+        self.logger.debug('Appending message "{0}" with priority {1}'
+                           .format(message, self._output_priority))
+        self._output_channel.add_message(message)
 
     def set_message(self, message, priority=0):
         ''' Saves the message in the output buffer so it can be delivered
@@ -230,18 +239,26 @@ class Environment:
             return True
         return False
 
+    def _deregister_current_task(self):
+        # deregister previous event managers
+        if self._current_task:
+            self._deregister_task_triggers(self._current_task)
+            self._current_task.ended_updated.deregister(self._on_task_ended)
+
+    def _on_task_ended(self, task):
+        assert (task == self._current_task)
+        # when a task ends, it doesn't process any more events
+        self._deregister_current_task()
+
     def _switch_new_task(self):
         '''
         Asks the task scheduler for a new task,
         reset buffers and time, and registers the event handlers
         '''
-        # deregister previous event managers
-        if self._current_task:
-            self._current_task.deinit()
-            self._deregister_task_triggers(self._current_task)
-
         # pick a new task
         self._current_task = self._task_scheduler.get_next_task()
+        # register to the ending event
+        self._current_task.ended_updated.register(self._on_task_ended)
         try:
             # This is to check whether the user didn't mess up in instantiating
             # the class
