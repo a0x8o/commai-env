@@ -24,6 +24,45 @@ def check_intervals(I_s, I_b):
         return False
 
 
+def check_continuity(Intvs):
+    """
+    verify that there is continuity in the list Intvs
+    """
+    I1 = Intvs[:-1]
+    I2 = Intvs[1:]
+    continuous = True
+    for (a, b) in zip(I1, I2):
+        continuous = (eval(a)[-1] + 1 == eval(b)[0])
+        if not(continuous):
+            break
+    return continuous
+
+
+def dic_interval_task(intervals, tasks):
+    '''
+    Construct the dictionary {interval:[available_tasks]} for training
+    and testing mode
+    '''
+    import itertools
+    import collections
+    # Create disjoint intervals (for each one we have a list of
+    # available tasks)
+    flat_intervals = list(set(list(itertools.chain(*intervals))))
+    flat_intervals.sort()
+    assert flat_intervals[0] == 0
+    seperate_intervals = [[x, y] for x, y in  itertools.izip(flat_intervals, flat_intervals[1:])]
+    task_intervals = collections.OrderedDict()
+    for I in seperate_intervals:
+        for count, task_interval in enumerate(intervals):
+            if check_intervals(I, task_interval):
+                if str(I) in task_intervals:
+                    task_intervals[str(I)].append(tasks[count])
+                else:
+                    task_intervals[str(I)] = [tasks[count]]
+    assert check_continuity(task_intervals.keys())
+    return task_intervals
+
+
 class RandomTaskScheduler:
     '''
     A Scheduler provides new tasks every time is asked.
@@ -32,11 +71,11 @@ class RandomTaskScheduler:
     def __init__(self, tasks):
         self.tasks = tasks
 
-    def get_next_task(self):
+    def get_next_task(self, train_mode=True):
         # pick a random task
         return random.choice(self.tasks)
 
-    def step(self, reward):
+    def step(self, reward, train_mode=True):
         # whatever
         pass
 
@@ -50,13 +89,13 @@ class SequentialTaskScheduler:
         self.tasks = tasks
         self.i = 0
 
-    def get_next_task(self):
+    def get_next_task(self, train_mode=True):
         # pick a random task
         ret = self.tasks[self.i]
         self.i = (self.i + 1) % len(self.tasks)
         return ret
 
-    def step(self, reward):
+    def step(self, reward, train_mode=True):
         # whatever
         pass
 
@@ -73,13 +112,13 @@ class IncrementalTaskScheduler:
         self.reward_count = 0
         self.success_threshold = success_threshold
 
-    def get_next_task(self):
+    def get_next_task(self, train_mode=True):
         if self.reward_count == self.success_threshold:
             self.reward_count = 0
             self.task_ptr = (self.task_ptr + 1) % len(self.tasks)
         return self.tasks[self.task_ptr]
 
-    def step(self, reward):
+    def step(self, reward, train_mode=True):
         self.reward_count += reward
 
 # TODO: Create a BatchedScheduler that takes as an argument another
@@ -115,11 +154,11 @@ class DependenciesTaskScheduler:
         # initially these are the tasks that have no dependencies on them
         self.find_available_tasks()
 
-    def get_next_task(self):
+    def get_next_task(self, train_mode=True):
         self.last_task = self.pick_new_task()
         return self.last_task
 
-    def step(self, reward):
+    def step(self, reward, train_mode=True):
         # remember the amount of times we have solved the task
         # using the name of the class to have a hashable value
         task_name = self.get_task_id(self.last_task)
@@ -148,49 +187,37 @@ class DependenciesTaskScheduler:
     def pick_new_task(self):
         return random.sample(self.available_tasks, 1)[0]
 
+
 class IntervalTaskScheduler:
     '''
     Switches to the next task type sequentially
     After the current task was successfully learned N times
     '''
 
-    def __init__(self, tasks, intervals):
+    def __init__(self, tasks, intervals, tasks_test=None):
         '''
         Args:
             tasks: a list of Task objects
             intervals: list of intervals [i1...in] where ik = [jk1,jk2].
         '''
-        # Create disjoint intervals (for each one we have a list of
-        # available tasks)
-        import itertools
-        import collections
-
         self.tasks = tasks
-
-        flat_intervals = list(set(list(itertools.chain(*intervals))))
-        flat_intervals.sort()
-        assert flat_intervals[0] == 0
-        seperate_intervals = [[x, y] for x, y in itertools.izip(flat_intervals, flat_intervals[1:])]
-        task_intervals = collections.OrderedDict()
-        for I in seperate_intervals:
-            for count, task_interval in enumerate(intervals):
-                if check_intervals(I, task_interval):
-                    if str(I) in task_intervals:
-                        task_intervals[str(I)].append(tasks[count])
-                    else:
-                        task_intervals[str(I)] = [tasks[count]]
-
-        self.task_intervals = task_intervals
+        self.task_intervals = dic_interval_task(intervals, tasks)
         self.iterations = 0
         self.num_interval = 0
         self.find_available_tasks()
 
-    def get_next_task(self):
-        return random.choice(self.available_tasks)
+        self.tasks_test = tasks_test
 
-    def step(self, reward):
-        self.iterations += 1
-        self.find_available_tasks()
+    def get_next_task(self, train_mode=True):
+        if train_mode:
+            return random.choice(self.available_tasks)
+        else:
+            return random.choice(self.tasks_test)
+
+    def step(self, reward, train_mode=True):
+        if train_mode:
+            self.iterations += 1
+            self.find_available_tasks()
 
     def find_available_tasks(self):
         itrls = self.task_intervals.keys()
